@@ -137,6 +137,16 @@ class DECA(nn.Module):
 
     # @torch.no_grad()
     def encode(self, images, use_detail=True):
+        if images.ndim == 5:
+            for idx in range(images.size(1)):
+                if idx == 0:
+                    output = self.encode(images[:,idx], use_detail=use_detail)
+                    output = {k: v.unsqueeze(1) for k,v in output.items()}
+                else:
+                    temp = self.encode(images[:,idx], use_detail=use_detail)
+                    for k, v in temp.items():
+                        output[k] = torch.cat([output[k], v.unsqueeze(1)], dim=1)
+            return output
         if use_detail:
             # use_detail is for training detail model, need to set coarse model as eval mode
             with torch.no_grad():
@@ -159,6 +169,28 @@ class DECA(nn.Module):
     # @torch.no_grad()
     def decode(self, codedict, rendering=True, iddict=None, vis_lmk=True, return_vis=True, use_detail=True,
                 render_orig=False, original_image=None, tform=None):
+        if codedict['images'].ndim == 5:
+            for idx in range(codedict['images'].size(1)):
+                _codedict = {k:v[:,idx] for k,v in codedict.items()}
+                if idx == 0:
+                    output = self.decode(_codedict, rendering=rendering, iddict=iddict, vis_lmk=vis_lmk, return_vis=return_vis, use_detail=use_detail,
+                            render_orig=render_orig, original_image=original_image, tform=tform)
+                    if isinstance(output, (tuple, list)):
+                        output[0] = {k:v.unsqueeze(1) for k,v in output[0].items()}
+                        output[1] = {k:v.unsqueeze(1) for k,v in output[1].items()}
+                    else:
+                        output = {k:v.unsqueeze(1) for k,v in output.items()}
+                else:
+                    temp = self.encode(images[:,idx], use_detail=use_detail)
+                    if isinstance(temp, (tuple, list)):
+                        for k, v in temp[0].items():
+                            temp[0][k] = torch.cat([temp[0][k], v.unsqueeze(1)], dim=1)
+                        for k, v in temp[1].items():
+                            temp[1][k] = torch.cat([temp[1][k], v.unsqueeze(1)], dim=1)
+                    else:
+                        for k, v in temp.items():
+                            output[k] = torch.cat([output[k], v.unsqueeze(1)], dim=1)
+            return output
         images = codedict['images']
         batch_size = images.shape[0]
         
@@ -193,7 +225,6 @@ class DECA(nn.Module):
         
         if self.cfg.model.use_tex:
             opdict['albedo'] = albedo
-            
         if use_detail:
             uv_z = self.D_detail(torch.cat([codedict['pose'][:,3:], codedict['exp'], codedict['detail']], dim=1))
             if iddict is not None:
@@ -233,7 +264,7 @@ class DECA(nn.Module):
             ## extract texture
             ## TODO: current resolution 256x256, support higher resolution, and add visibility
             uv_pverts = self.render.world2uv(trans_verts)
-            uv_gt = F.grid_sample(images, uv_pverts.permute(0,2,3,1)[:,:,:,:2], mode='bilinear')
+            uv_gt = F.grid_sample(images, uv_pverts.permute(0,2,3,1)[:,:,:,:2], mode='bilinear', align_corners=False)
             if self.cfg.model.use_tex:
                 ## TODO: poisson blending should give better-looking results
                 uv_texture_gt = uv_gt[:,:3,:,:]*self.uv_face_eye_mask + (uv_texture[:,:3,:,:]*(1-self.uv_face_eye_mask))
@@ -241,6 +272,7 @@ class DECA(nn.Module):
                 uv_texture_gt = uv_gt[:,:3,:,:]*self.uv_face_eye_mask + (torch.ones_like(uv_gt[:,:3,:,:])*(1-self.uv_face_eye_mask)*0.7)
             
             opdict['uv_texture_gt'] = uv_texture_gt
+            ops_detail = self.render(verts, trans_verts, opdict['uv_texture'], codedict['light'])
             visdict = {
                 'inputs': images, 
                 'landmarks2d': util.tensor_vis_landmarks(images, landmarks2d),
@@ -249,7 +281,8 @@ class DECA(nn.Module):
                 'shape_detail_images': shape_detail_images
             }
             if self.cfg.model.use_tex:
-                visdict['rendered_images'] = ops['images']
+                # visdict['rendered_images'] = ops['images']  # original
+                visdict['rendered_images'] = ops_detail['images']
 
             return opdict, visdict
 
